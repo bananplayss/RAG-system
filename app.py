@@ -1,4 +1,3 @@
-from sentence_transformers import SentenceTransformer
 from llama_index.core import (
     Settings, SimpleDirectoryReader, StorageContext, VectorStoreIndex
 )
@@ -7,12 +6,15 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
 from llama_index.vector_stores.postgres import PGVectorStore
 from llama_index.core.postprocessor import SentenceTransformerRerank
+from llama_index.core.evaluation import FaithfulnessEvaluator
 
 import logging
 import os
 from dotenv import load_dotenv
 from pathlib import Path
+import asyncio
 
+#logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -21,12 +23,10 @@ logging.basicConfig(
 logger = logging.getLogger("local_rag")
 logger.info("Imports loaded successfully.")
 
-Settings.embed_model = HuggingFaceEmbedding(
-    model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-)
-
-Settings.text_splitter = SentenceSplitter(chunk_size=400, chunk_overlap=10)
-Settings.llm = Ollama(
+#models
+embed_model = HuggingFaceEmbedding(model_name="Qwen/Qwen3-Embedding-0.6B")
+text_splitter = SentenceSplitter(chunk_size=400, chunk_overlap=10)
+llm = Ollama(
     model="qwen3:4b-instruct",
     context_window=8192,
     request_timeout=300.0,
@@ -38,8 +38,14 @@ Settings.llm = Ollama(
     Do not infer policies from related statements. 
     Answer only the question asked.
     """,
-)
+    temperature=0,)
 
+#global settings
+Settings.embed_model = embed_model
+Settings.text_splitter = text_splitter
+Settings.llm = llm
+
+#vector store
 env_path = Path(__file__).resolve().parent / ".env"
 loaded = load_dotenv(env_path, override=True)
 
@@ -54,9 +60,11 @@ vector_store = PGVectorStore.from_params(
 )
 
 storage_context = StorageContext.from_defaults(vector_store=vector_store)
+
+#docs
 documents = SimpleDirectoryReader("./data").load_data()
 
-
+#index
 index = VectorStoreIndex.from_vector_store(
     vector_store=vector_store,
     storage_context=storage_context,
@@ -71,6 +79,7 @@ index = VectorStoreIndex.from_documents(
 )
 """
 
+#querying
 query_engine = index.as_query_engine(
     similarity_top_k=6,
     node_postprocessors=[
@@ -81,13 +90,39 @@ query_engine = index.as_query_engine(
     ],
 )
 
-query = ""
-print("Szia!")
-while(True):
-    query = input("Kérdezz bátran: ")
-    if(query == "exit"):
-        print("Viszlát!")
-        break
-    response = query_engine.query(query)
-    print(response)
-    
+#evaluation
+evaluator_llm = Ollama(
+    model="qwen3:8b",
+    context_window=8192,
+    temperature=0,
+    request_timeout=300.0,
+)
+
+evaluator = FaithfulnessEvaluator(llm=evaluator_llm)
+
+#main
+async def main():
+    print("Szia!")
+
+    while True:
+        query = input("Kérdezz bátran: ")
+        if query == "exit":
+            print("Viszlát!")
+            break
+
+        response = await query_engine.aquery(query)
+        eval_result = await evaluator.aevaluate_response(
+            query=query,
+            response=response,
+        )
+
+        print(response)
+        print("---")
+        print(
+            f"Evaluation result: passing - {eval_result.passing}, "
+            f"score - {eval_result.score}, feedback - {eval_result.feedback}"
+        )
+
+asyncio.run(main())
+
+
